@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
 
 
@@ -10,29 +10,20 @@ import numpy as np
 # 改进点: 加入 Mini-batch 训练
 # =============================================================================
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
-import numpy as np
-
-
 class FastAdaptiveRobustRegressor:
-    def __init__(self, input_dim=1, hidden_dim=64, epochs=30, learning_rate=0.005, device='cpu', random_state=42):
-        """
-        新增 random_state 参数用于控制随机种子
-        """
+    def __init__(self, input_dim=1, hidden_dim=64, learning_rate=0.005, device='cpu'):
         self.device = device
         self.input_dim = input_dim
-        self.epochs = epochs
-        self.random_state = random_state  # 保存种子
 
-        # === 1. 控制初始化的随机性 ===
-        self._set_seed()  # 在创建层之前设置种子
+        self.model = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        ).to(device)
 
-        self.model = nn.Linear(input_dim, 1).to(device)
-
-        # 自适应参数 (固定值初始化，无随机性，但为了保险起见放在 seed 之后)
+        # 自适应参数
         self.alpha = nn.Parameter(torch.tensor(1.0).to(device))
         self.scale = nn.Parameter(torch.tensor(1.0).to(device))
 
@@ -40,16 +31,6 @@ class FastAdaptiveRobustRegressor:
             list(self.model.parameters()) + [self.alpha, self.scale],
             lr=learning_rate
         )
-
-    def _set_seed(self):
-        """辅助函数：设置所有相关的随机种子"""
-        torch.manual_seed(self.random_state)
-        torch.cuda.manual_seed(self.random_state)
-        torch.cuda.manual_seed_all(self.random_state)  # if use multi-GPU
-        # 保证 CUDNN 确定性 (会牺牲一点性能，但保证结果一致)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        np.random.seed(self.random_state)
 
     def _barron_loss_function(self, residuals):
         # 限制参数范围以保证数值稳定
@@ -64,34 +45,21 @@ class FastAdaptiveRobustRegressor:
         loss_val = (abs_alpha_minus_2 / (alpha + 1e-6)) * (torch.pow(inner, alpha / 2.0) - 1.0)
         return torch.mean(loss_val)
 
-    def fit(self, X, y, batch_size=64, verbose=False):
+    def fit(self, X, y, batch_size=64, epochs=30, verbose=False):
         """
         增加了 batch_size 参数，使用 DataLoader 加速
         """
-        # === 2. 控制 DataLoader Shuffle 的随机性 ===
-        # 每次 fit 前重置种子，确保相同数据输入的 shuffle 顺序一致
-        # 或者创建一个特定的 generator 给 DataLoader
-        g = torch.Generator()
-        g.manual_seed(self.random_state)
-
         # 转换为 Tensor
         X_tensor = torch.FloatTensor(X).to(self.device)
         y_tensor = torch.FloatTensor(y).reshape(-1, 1).to(self.device)
 
         # 创建 DataLoader
         dataset = TensorDataset(X_tensor, y_tensor)
-
-        # 关键修改：传入 generator 确保 shuffle 一致
-        dataloader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            generator=g
-        )
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
         self.model.train()
 
-        for epoch in range(self.epochs):
+        for epoch in range(epochs):
             epoch_loss = 0.0
             for batch_X, batch_y in dataloader:
                 self.optimizer.zero_grad()
@@ -110,6 +78,7 @@ class FastAdaptiveRobustRegressor:
 
     def predict(self, X):
         self.model.eval()
+        # 预测时如果数据量太大，也建议切分，这里简单处理
         with torch.no_grad():
             X_tensor = torch.FloatTensor(X).to(self.device)
             return self.model(X_tensor).cpu().numpy()
@@ -123,7 +92,7 @@ class FastAdaptiveRobustRegressor:
 # =============================================================================
 
 class Fast_TTL_HOVR_Regressor:
-    def __init__(self, input_dim=1, hidden_dim=64,epochs = 30, learning_rate=0.005,
+    def __init__(self, input_dim=1, hidden_dim=64, learning_rate=0.005,
                  trim_ratio=0.2, reg_lambda=0.1, hovr_sample_rate=0.1, device='cpu'):
         """
         hovr_sample_rate: float (0.0 ~ 1.0).
@@ -134,7 +103,7 @@ class Fast_TTL_HOVR_Regressor:
         self.trim_ratio = trim_ratio
         self.reg_lambda = reg_lambda
         self.hovr_sample_rate = hovr_sample_rate
-        self.epochs = epochs
+
         self.model = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.Tanh(),
@@ -145,7 +114,7 @@ class Fast_TTL_HOVR_Regressor:
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
 
-    def fit(self, X, y, batch_size=64, verbose=False):
+    def fit(self, X, y, batch_size=64, epochs=10, verbose=False):
         X_tensor = torch.FloatTensor(X).to(self.device)
         y_tensor = torch.FloatTensor(y).reshape(-1, 1).to(self.device)
 
@@ -154,7 +123,7 @@ class Fast_TTL_HOVR_Regressor:
 
         self.model.train()
 
-        for epoch in range(self.epochs):
+        for epoch in range(epochs):
             epoch_loss = 0
 
             for batch_X, batch_y in dataloader:
@@ -237,7 +206,7 @@ import matplotlib.pyplot as plt
 # 功能: 定义神经网络结构 (Transformer Encoder + Parameter Prediction Head)
 # ==============================================================================
 class R2T_Core(nn.Module):
-    def __init__(self, input_dim=1, d_model=32, nhead=4, num_layers=2, output_dim=2):
+    def __init__(self, input_dim=1, d_model=128, nhead=4, num_layers=2, output_dim=2):
         """
         R2T 核心网络结构
         Args:
@@ -307,7 +276,7 @@ class R2T_Core(nn.Module):
 
 
 class R2T_Regressor:
-    def __init__(self, input_dim=1, learning_rate=0.005, epochs=20, device='cpu'):
+    def __init__(self, input_dim=1, learning_rate=0.005, epochs=30, device='cpu'):
         self.device = device
         self.input_dim = input_dim
         self.epochs = epochs

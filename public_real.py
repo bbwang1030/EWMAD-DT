@@ -18,18 +18,20 @@ from sequd import SeqUD
 import os
 from IPCD import *
 from robust_NN_real_data import *
+import copy
 # 数据生成
 np.random.seed(2)
 
 # datasets = ["micro"]
 # datasets = ["bike_day"]
 # datasets = ["worker"]
-datasets = ["Metro"]
+# datasets = ["Metro"]
 # datasets = ["energy","Metro"]
 # datasets = ["Airquality"]
-datasets = ["pi5"]
-datasets = ["worker","Metro","Airquality","bike_day","pi4"]
-datasets = ["pi2","pi3"]
+# datasets = ["pi4","pi5"]
+# datasets = ["worker","Airquality","bike_day","pi4","pi2","pi3","pi5"]
+# datasets = ["pi2","pi3"]
+datasets = ["worker","Airquality","bike_day"]
 
 def find_closest_values1(list_A, list_B):
     """
@@ -82,152 +84,274 @@ def find_closest_values1(list_A, list_B):
 
     return abrupt_seq, inc_starts, inc_lens
 
+
 class architecture:
-    def __init__(self,model,model_name, X, Y, window_size, detector, detetor_name,eta):
+    def __init__(self, model, model_name, X, Y, window_size, detector, detetor_name, eta):
         self.model = model
         self.model_name = model_name
-        self.X=X
-        self.Y=Y
-        self.window_size=window_size
-        self.detector=detector
-        self.detetor_name=detetor_name
+        self.X = X
+        self.Y = Y
+        self.window_size = window_size
+        self.detector = detector
+        self.detetor_name = detetor_name
         self.eta = eta
+
+        # 结果记录
         self.drift_points = []
         self.outlier_points = []
         self.abrupt_drift_point = []
+        self.abrupt_drift_point_pre = []
         self.incremental_begin_points = []
         self.incremental_end_points = []
+
+        # 状态标志
         self.outlier_warning = "not_outlier_warning"
         self.outlier_warning_before = False
         self.outlier_check_before = False
+        self.drift_state_before = None
+        self.pending_drift_idx = None
+
+        # === 新增/修改的核心变量 ===
+        self.beta_ols = np.zeros((X.shape[1],1))  # 用于存储 IPOD 模型的参数
+        self.mean_res = 0  # 当前模型的残差均值
+        self.std_res = 1  # 当前模型的残差标准差
+
+        # 缓冲机制变量
+        self.is_buffering = False
+        self.buffer_X = []
+        self.buffer_Y = []
+        self.buffer_residuals = []
+    def _retrain_model(self, X_train, Y_train):
+        """
+        辅助函数：使用给定的数据训练模型，并更新 mean/std 统计量
+        """
+        if self.model_name == "$\Theta$-IPOD":
+            # 计算 Hat Matrix
+            reference_H = np.dot(
+                np.dot(X_train, inv(np.dot(X_train.T, X_train))),
+                X_train.T
+            )
+            # 调用 IPOD 算法
+            # print(1111)
+            reference_result = IPOD_new(X_train, Y_train, reference_H, eta=self.eta)
+            # print(2222)
+            gamma = reference_result["gamma"].reshape((len(X_train), 1))
+
+            # 更新 OLS 参数 (self.beta_ols)
+            self.beta_ols = np.dot(
+                inv(np.dot(X_train.T, X_train)),
+                np.dot(X_train.T, Y_train - gamma)
+            )
+
+            # 更新统计量
+            residuals = Y_train - np.dot(X_train, self.beta_ols) - gamma
+            self.mean_res = np.mean(residuals)
+            self.std_res = np.std(residuals)
+
+        else:
+            # 普通模型训练
+            self.model.fit(X_train, Y_train.ravel())
+
+            # 更新统计量
+            preds = self.model.predict(X_train)
+            residuals = Y_train - preds
+            self.mean_res = np.mean(residuals)
+            self.std_res = np.std(residuals)
 
     def process(self):
-        # reference_window_X = X[:self.window_size]
-        # reference_window_Y = Y[:self.window_size]
-        # model.fit(reference_window_X, reference_window_Y.ravel())
-
-        res = [0]
+        res = []  # 存储所有残差
         res_nonotlier = []
-        # print(X.shape,len(X))
-        for i in range(self.window_size, len(X)):
-            test_window_X = self.X[i - self.window_size:i]
-            test_window_Y = self.Y[i - self.window_size:i]
+        temp_warning_before = False
+        temp_check_before = False
 
-            if self.detector.drift_state == "drift" or i==self.window_size:
-                reference_window_X = test_window_X
-                reference_window_Y = test_window_Y
-                if self.model_name == "$\Theta$-IPOD":
-                    reference_H = np.dot(
-                        np.dot(reference_window_X, inv(np.dot(reference_window_X.T, reference_window_X))),
-                        reference_window_X.T
-                    )
-                    # print(i)
-                    reference_result = IPOD_new(reference_window_X, reference_window_Y, reference_H, eta=self.eta)
-                    # print(222)
-                    gamma = reference_result["gamma"].reshape((self.window_size, 1))
+        for i in range(len(self.X)):
 
-                    self.detector.reset()
-
-                    beta_ols = np.dot(
-                        inv(np.dot(reference_window_X.T, reference_window_X)),
-                        np.dot(reference_window_X.T, reference_window_Y - gamma)
-                    )
-
-                    mean = np.mean(reference_window_Y - np.dot(reference_window_X, beta_ols) - gamma)
-                    std = np.std(reference_window_Y - np.dot(reference_window_X, beta_ols) - gamma)
-                    # y_pred = np.dot(new_X, beta_ols)
-
-                    # print(reference_window_X.shape,(reference_window_Y - gamma).shape,beta_ols.shape,y_pred)
-                    # residual = abs((new_Y - np.dot(new_X, beta_ols))/new_Y)
-                else:
-                    # new_X = new_X.reshape(1, -1)
-                    self.model.fit(reference_window_X, reference_window_Y.ravel())
-                    mean = np.mean(reference_window_Y - self.model.predict(reference_window_X))
-                    std = np.std(reference_window_Y - self.model.predict(reference_window_X))
-                    self.detector.reset()
-                    # y_pred = model.predict(new_X)[0]
-
+            # 获取当前单个数据点 (Current Instance)
             if self.model_name == "$\Theta$-IPOD":
-                new_X = self.X[i - self.window_size]
-                new_Y = self.Y[i - self.window_size]
-                y_pred = np.dot(new_X, beta_ols)
-                # print(abs(new_Y - y_pred),mean,std)
+                curr_X = self.X[i].reshape(1, -1)  # 保持维度一致
+                curr_Y = self.Y[i]
             else:
-                new_X = self.X[i - self.window_size].reshape(1, -1)
-                new_Y = self.Y[i - self.window_size]
-                y_pred = self.model.predict(new_X)[0]
+                curr_X = self.X[i].reshape(1, -1)
+                curr_Y = self.Y[i]
 
-            residual = abs((new_Y - y_pred) / new_Y)
-            # print(residual)
-            res.append(float(residual))
-            # detector.update(np.array([residual]))
-            outlier_warning = abs(new_Y - y_pred) > mean+(2* std)
-            outlier_check = abs(new_Y - y_pred) > mean+(2.6* std)
-
-            if self.outlier_warning_before and not outlier_warning and self.drift_state_before != "drift":
-                self.outlier_warning = "outlier_warning"
-                if self.outlier_check_before:
-                    self.outlier_warning = "outlier"
-                    self.outlier_points.append(i - self.window_size - 1)
-                    # print(i - self.window_size-1)
-                # if (i - self.window_size-1)==58006 or (i - self.window_size-1)==58008:
-                #     print(res[-2])
-            # elif self.detector.drift_state == "drift":
-            #     self.detector.update(np.array([res[-1]]))
+            # -------------------------------------------------------
+            # A. 预测 (Prediction) - 始终使用“当前可用模型”
+            # -------------------------------------------------------
+            if self.model_name == "$\Theta$-IPOD":
+                # 注意：curr_X 这里如果是 (1, features)，beta_ols 是 (features, 1)
+                y_pred = np.dot(curr_X, self.beta_ols)[0]
             else:
-                if self.detector.samples_since_reset == 0:
-                    self.detector.update(np.array(0))
-                    res_nonotlier.append(0)
-                    # print(self.detector.samples_since_reset,np.array([res[-2]]))
+                if i==0:
+                    X_init = np.random.rand(window_size, X.shape[1])
+                    Y_init = np.random.rand(window_size)  # 或者是 zeros
+
+                    # 然后调用
+                    self._retrain_model(X_init, Y_init)
+                y_pred = self.model.predict(curr_X)[0]
+
+            # 计算当前残差
+            if isinstance(y_pred, (np.ndarray, list)):
+                y_pred = y_pred[0]  # 确保是标量
+
+            # 防止除以0错误，加个极小值
+            denom = curr_Y
+            residual = abs((curr_Y - y_pred) / denom)
+            if self.is_buffering==False:
+                res.append(float(residual))
+
+            # 异常值检测 (基于当前模型的统计量)
+            # 注意：residual 是绝对百分比误差，下面的 mean/std 应该是基于绝对误差还是什么？
+            # 假设你的 self.mean_res 和 self.std_res 也是基于同一种误差计算的
+            # 这里沿用你原来的逻辑： abs(new_Y - y_pred) > ...
+            abs_diff = abs(curr_Y - y_pred)
+            outlier_warning = abs(abs_diff-self.mean_res) >  (2 * self.std_res)
+            outlier_check = abs(abs_diff-self.mean_res) >  (2.6 * self.std_res)
+
+            # -------------------------------------------------------
+            # B. 状态分支：缓冲期 vs 监控期
+            # -------------------------------------------------------
+
+            if self.is_buffering or i<self.window_size:
+                # === 缓冲期 (Buffering Phase) ===
+                # 即使在缓冲，我们已经做了预测(步骤A)，现在只负责收集数据
+                # 不更新检测器！
+                if self.model_name == "$\Theta$-IPOD":
+                    curr_X = self.X[i].reshape(1, -1)
+                    # print(curr_X.shape,self.beta_ols.shape)
+                    y_pred = np.dot(curr_X, self.beta_ols)[0]
                 else:
-                    self.outlier_warning = "not_outlier_warning"
-                    self.detector.update(np.array([res[-2]]))
-                    if self.detector.drift_state != "drift" and not outlier_warning:
-                        res_nonotlier.append(res[-2])
-                        # print(res[-2])
+                    curr_X = self.X[i].reshape(1, -1)
+                    y_pred = self.model.predict(curr_X)[0]
 
-            self.outlier_warning_before = outlier_warning
-            self.outlier_check_before = outlier_check
-            self.drift_state_before = self.detector.drift_state
+                curr_Y = self.Y[i]
+                # 存绝对误差用于计算分布，同时也存原始值用于后续可能的训练
+                raw_abs_diff = abs(curr_Y - y_pred)
+                self.buffer_residuals.append(raw_abs_diff)
+                self.buffer_X.append(self.X[i])
+                self.buffer_Y.append(self.Y[i])
 
-            distinguish = ["EWMAD_DT", "DataStream_Adapt"]
-            non_distinguish = ["DDM", "PageHinkley", "HDDM_A", "HDDM_W", "KSWIN", "ADWIN"]
+                # 1. 计算局部均值 (这个值很大，比如 10.0)
+                local_mean = abs(np.mean(self.buffer_residuals))
 
-            if self.detetor_name == "EWMAD_DT":
-                if self.detector.drift_state == "drift" and self.detector.drift_state_type != "incremental_end":
-                    self.drift_points.append(i - self.window_size - 1)
-                if self.detector.drift_state == "drift" and self.detector.drift_state_type == "incremental_end":
-                    self.incremental_end_points.append(i - self.window_size - 1)
-                # self.drift_points = self.drift_points
-                self.incremental_begin_points, self.abrupt_drift_point, inc_lens = find_closest_values1(self.drift_points,self.incremental_end_points)
-                # print(self.drift_points, self.incremental_end_points,self.incremental_begin_points)
-                # self.abrupt_drift_point = list(set(self.drift_points) - set(self.incremental_begin_points))
+                # 2. 计算局部波动 (这个值很小，比如 0.2)
+                local_std = abs(np.std(self.buffer_residuals))
 
-            elif self.detetor_name == "DataStream_Adapt":
-                if self.detector.drift_state == "drift" and self.detector.drift_state_type != "incremental_end":
-                    self.abrupt_drift_point.append(i - self.window_size - 1)
-                elif self.detector.drift_state_type == "incremental_end":
-                    # print(self.incremental_begin_points)
-                    self.incremental_begin_points.append(i - self.window_size - 1)
-                # self.abrupt_drift_point = self.drift_points
-                # self.incremental_begin_points = self.incremental_end_points
-                self.drift_points = self.abrupt_drift_point + self.incremental_begin_points
-                self.incremental_end_points = []
-            elif self.detetor_name in non_distinguish:
-                # print(self.detetor_name)
-                if self.detector.drift_state == "drift":
-                    # print(i - self.window_size - 1)
-                    self.drift_points.append(i - self.window_size - 1)
-                self.incremental_end_points = []
-                drift_points = self.drift_points
-                self.abrupt_drift_point = []
-                self.incremental_begin_points = []
-                self.incremental_end_points = []
+                outlier_warning_ = abs(raw_abs_diff-local_mean) >  (2 * local_std)
+                outlier_check_ = abs(raw_abs_diff-local_mean) >  (2.6 * local_std)
+                # print("i,raw_abs_diff", i, raw_abs_diff,local_mean)
+                if temp_warning_before and not outlier_warning_ and len(self.buffer_residuals) >= 10:
+                    # 警告消失，说明上一个点可能是 outlier (或者 warning 只是误报)
+                    # 你的逻辑：Warning -> Normal (Warning消失) -> 检查之前是不是 Check 级别
+                    if temp_check_before:
+                        # 确认是 Outlier
+                        # 还原全局索引
+                        self.outlier_points.append(i-1)
+                        del self.buffer_residuals[-2]
 
-            # if outlier_warning != True:
-            #     res_nonotlier.append(residual)
 
-        return self.drift_points, self.abrupt_drift_point, self.incremental_begin_points, self.incremental_end_points, self.outlier_points,res_nonotlier,res
+                temp_warning_before = outlier_warning_
+                temp_check_before = outlier_check_
+
+                # self.buffer_X.append(self.X[i])
+                # self.buffer_Y.append(self.Y[i])
+
+                # 检查缓冲区是否满了
+                if len(self.buffer_X) == self.window_size:
+                    # 缓冲区已满 -> 训练新模型
+                    X_buf_arr = np.array(self.buffer_X)
+                    Y_buf_arr = np.array(self.buffer_Y)
+
+                    self._retrain_model(X_buf_arr, Y_buf_arr)
+                    # print(i-1)
+                    # 重置状态
+                    # self.detector.reset()
+                    self.is_buffering = False
+                    self.buffer_X = []  # 清空
+                    self.buffer_Y = []
+                    self.buffer_residuals = []
+                    # 记录漂移结束点（可选）
+                    # self.incremental_end_points.append(i - self.window_size)
+
+            else:
+                # === 监控期 (Monitoring Phase) ===
+                # 只有在非缓冲期，才更新检测器寻找漂移
+
+                # 更新检测器逻辑 (沿用你的 Outlier 过滤逻辑)
+                # print(i-1,res[-2],i,res[-1],abs_diff , self.mean_res+(2 * self.std_res))
+                if self.outlier_warning_before and not outlier_warning and self.drift_state_before != "drift":
+                    self.outlier_warning = "outlier_warning"
+                    if self.outlier_check_before:
+                        self.outlier_warning = "outlier"
+                        self.outlier_points.append(i - 1)
+                else:
+                    if self.detector.samples_since_reset == 0:
+                        self.detector.update(np.array(0))
+                        res_nonotlier.append(0)
+                    else:
+                        # 使用前一个点的残差更新 (根据你的原始逻辑 res[-2])
+                        # 注意：现在 res[-1] 是当前点，res[-2] 是上一个点
+                        update_val = res[-2]
+                        self.detector.update(np.array([update_val]))
+
+                        # 如果不是漂移也不是 Outlier，记录为正常点
+                        if not outlier_warning:
+                            res_nonotlier.append(update_val)
+
+                    # 检查是否发生漂移
+                    if self.detector.drift_state == "drift":
+                        # === 触发漂移 ===
+                        # 1. 记录漂移点
+                        current_idx = i - 1  # 保持和你原来索引一致
+                        self.drift_points.append(current_idx)
+
+                        # 处理具体的漂移类型记录 (EWMAD 等)
+                        self._handle_drift_logging(current_idx)
+                        # print(current_idx, self.detector.drift_state_type )
+                        # 2. 开启缓冲模式
+                        self.is_buffering = True
+                        self.detector.reset()
+                        # 3. 将**当前点**作为缓冲区的第一个点
+                        self.buffer_X.append(self.X[i])
+                        self.buffer_Y.append(self.Y[i])
+
+
+                # 更新历史状态
+                self.outlier_warning_before = outlier_warning
+                self.outlier_check_before = outlier_check
+                self.drift_state_before = self.detector.drift_state # 注意：buffer期间 drift_state 不会变
+        # print("outlier_points",self.outlier_points)
+        # print("drift_points",self.drift_points)
+        return self.drift_points, self.abrupt_drift_point, self.incremental_begin_points, self.incremental_end_points, self.outlier_points, res_nonotlier, res
+
+    def _handle_drift_logging(self, current_idx):
+        """处理不同检测器的漂移点记录逻辑 (从原代码提取)"""
+        distinguish = ["EWMAD_DT", "DataStream_Adapt"]
+        non_distinguish = ["DDM", "PageHinkley", "HDDM_A", "HDDM_W", "KSWIN", "ADWIN"]
+
+        if self.detetor_name == "EWMAD_DT":
+            if self.detector.drift_state_type != "incremental":
+                self.abrupt_drift_point.append(current_idx)
+            elif self.detector.drift_state_type == "incremental":
+                self.incremental_begin_points.append(current_idx)
+            # self.drift_points = self.abrupt_drift_point + self.incremental_begin_points
+            self.incremental_end_points = []
+
+        elif self.detetor_name == "DataStream_Adapt":
+            if self.detector.drift_state_type != "incremental":
+                self.abrupt_drift_point.append(current_idx)
+            elif self.detector.drift_state_type == "incremental":
+                self.incremental_begin_points.append(current_idx)
+            # self.drift_points = self.abrupt_drift_point + self.incremental_begin_points
+            self.incremental_end_points = []
+
+        elif self.detetor_name in non_distinguish:
+            # 简单的漂移记录
+            # 注意：我们在主循环里已经 append 到 self.drift_points 了
+            # 这里清理其他列表
+            self.incremental_end_points = []
+            self.abrupt_drift_point = []
+            self.incremental_begin_points = []
+
 
 def set_params(name_detector, params):
     if name_detector == "ADWIN":
@@ -292,24 +416,33 @@ def F1_score(drift_points, true_drift_points, judge_size):
 
 
 def max_metric(name_detector, params, true_drift_points, judge_size, model, name, X, all_Y, window_size, eta):
-    time_list=[]
-    # print(params)
+    # try:
+    #     current_model = clone(model)
+    # except:
+    #     # 对于自定义模型 ARLF，如果没有实现 get_params，clone 会报错
+    #     # 需要手动重新实例化，或者确保 ARLF 实现了 sklearn 接口
+    #     # 简单粗暴法：利用 type(model) 重新创建
+    #     current_model = type(model)(**model.get_params()) if hasattr(model, 'get_params') else copy.deepcopy(model)
+    time_list = []
     detector = set_params(name_detector, params)
     start_time = time.time()
-    arch = architecture(model,name, X, all_Y, window_size, detector, name_detector,eta)
+    arch = architecture(model, name, X, all_Y, window_size, detector, name_detector, eta)
     drift_points, abrupt_drift_point, incremental_begin_points, incremental_end_points, outlier_points, res_nonotlier, res = arch.process()
+    end_time = time.time()
+    execution_time = end_time - start_time
+    time_list.append(execution_time)
+    percentage = (len(res)-len(res_nonotlier))/len(all_Y)
     # if name != "Ipod":
-    #     drift_points, abrupt_drift_point, incremental_begin_points, incremental_end_points,res_nonotlier,res = drift_detection_with_detector(
+    #     drift_points, abrupt_drift_point, incremental_begin_points, incremental_end_points,res_nonotlier, res = drift_detection_with_detector(
     #         model, X, all_Y, window_size, detector, name_detector)
     #     outlier_points = []
     #     F1_Score_ = 0
-    # if name == "Ipod":
+    # elif name == "Ipod":
+    #     print(params)
     #     ipcd = IPCD(X=X, Y=all_Y, window_size=window_size, detector=detector, detetor_name=name_detector, eta=eta,
     #                 outlier_test=True)
-    #     drift_points, abrupt_drift_point, incremental_begin_points, incremental_end_points, outlier_points, res_nonotlier,res = ipcd.fit()
-    #     # print(outlier_points,outlier_list,drift_points,abrupt_drift_point, incremental_begin_points, incremental_end_points)
-    #     # print(res)
-    # print(np.mean(res))
+    #     drift_points, abrupt_drift_point, incremental_begin_points, incremental_end_points, outlier_points,res_nonotlier, res = ipcd.fit()
+    #     # print(drift_points)
     true_outlier_points = outlier_list
 
     TP_ = 0
@@ -317,7 +450,7 @@ def max_metric(name_detector, params, true_drift_points, judge_size, model, name
     FN_ = 0
     for detect in outlier_points:
         # print(detect)
-        # 检测到的点是否在实际异常点的有效范围内
+        # 检测到的点是否在实际漂移点的有效范围内
         if any(((detect - actual) == 0) for actual in
                true_outlier_points):
             TP_ += 1  # 真阳性
@@ -326,27 +459,42 @@ def max_metric(name_detector, params, true_drift_points, judge_size, model, name
         # for actual in true_outlier_points:
         #     if (detected - actual) == 0 and (detected - actual) >= 0:
         #         # delay.append(detected - actual)
-    # 漏报的异常点
+    # 漏报的漂移点
     for actual in true_outlier_points:
         if not any(((detect - actual) == 0) for detect in
                    outlier_points):
             FN_ += 1  # 假阴性
+    # print(TP_, FP_, FN_)
     Precision_ = TP_ / (TP_ + FP_) if (TP_ + FP_) > 0 else 0
     Recall_ = TP_ / (TP_ + FN_) if (TP_ + FN_) > 0 else 0
-    F1_Score_ = 2 * (Precision_ * Recall_) / (Precision_ + Recall_) if (Precision_ + Recall_) > 0 else 0
-    # print(F1_Score_,TP_, FP_, FN_)
+    if TP_ != 0:
+        F1_Score_ = 2 * (Precision_ * Recall_) / (Precision_ + Recall_)
+    else:
+        F1_Score_ = 0
+    # print("outlier",F1_Score_, Precision_, Recall_, TP_, FP_, FN_)
+    # judge_size = 100  # 漂移前后50个点为有效范围
+    # true_drift_points = [i for i in range(n_i, len(X), n_i)]  # 模拟真实漂移点
 
     F1_Score, Precision, Recall, TP, FP, FN, delay = F1_score(drift_points, true_drift_points, judge_size)
+    # print("alldrift", F1_Score, Precision, Recall, TP, FP, FN)
 
-    F1_Score_abrupt, Precision_abrupt, Recall_abrupt, TP_abrupt, FP_abrupt, FN_abrupt, delay_abrupt = F1_score(
-        abrupt_drift_point, true_abrupt_points, judge_size)
+    # # judge_size = 50  # 漂移前后50个点为有效范围
+    # if drift_type == "abrupt" or drift_type == "incremental":
+    #     true_abrupt_points = [i for i in range(n_i, len(X), n_i)]  # 模拟真实漂移点
+    # elif drift_type == "mixed":
+    #     true_abrupt_points = [n_i * i for i in mix_random_numbers]
+    # F1_Score_abrupt, Precision_abrupt, Recall_abrupt, TP_abrupt, FP_abrupt, FN_abrupt, delay_abrupt = F1_score(
+    #     abrupt_drift_point, true_abrupt_points, judge_size)
+    # print("abrupt", F1_Score_abrupt, Precision_abrupt, Recall_abrupt, TP_abrupt, FP_abrupt, FN_abrupt)
+    #
+    # if drift_type == "abrupt" or drift_type == "incremental":
+    #     true_incre_points = [i for i in range(n_i, len(X), n_i)]  # 模拟真实漂移点
+    # elif drift_type == "mixed":
+    #     true_incre_points = [n_i * i for i in remaining]
+    # F1_Score_incre, Precision_incre, Recall_incre, TP_incre, FP_incre, FN_incre, delay_incre = F1_score(
+    #     incremental_begin_points, true_incre_points, judge_size)
+    # print("incremental", F1_Score_incre, Precision_incre, Recall_incre, TP_incre, FP_incre, FN_incre)
 
-    F1_Score_incre, Precision_incre, Recall_incre, TP_incre, FP_incre, FN_incre, delay_incre = F1_score(
-        incremental_begin_points, true_incre_points, judge_size)
-
-    end_time = time.time()
-    execution_time = end_time - start_time
-    time_list.append(execution_time)
 
     results = {
         "detector": name_detector,
@@ -357,16 +505,30 @@ def max_metric(name_detector, params, true_drift_points, judge_size, model, name
         "Precision": Precision,
         "Recall": Recall,
         "F1_Score_alldrift": F1_Score,
-        "F1_Score_abrupt": F1_Score_abrupt,
-        "F1_Score_incremental": F1_Score_incre,
+        # "F1_Score_abrupt": F1_Score_abrupt,
+        # "F1_Score_incremental": F1_Score_incre,
         "F1_Score_outlier": F1_Score_,
         "time": np.mean(time_list),
-        "mean_delay": np.mean(delay),
+        # "mean_delay": np.mean(delay)+1,
+        # "mean_delay_abrupt": np.mean(delay_abrupt)+1,
+        # "mean_delay_incre": np.mean(delay_incre)+1,
         "mean_res_nonotlier": np.mean(res_nonotlier),
-        "mean_res":np.mean(res)
+        "mean_res": np.mean(res),
+        "percentage_delate":percentage
     }
 
-    return F1_Score, results, drift_points, outlier_points, abrupt_drift_point, incremental_begin_points, incremental_end_points, np.mean(res_nonotlier),np.mean(res)
+    # if F1_Score >= best_score:
+    #     best_score = F1_Score
+    #     best_param = params
+    #     best_results = results
+    #     best_drift_points = drift_points
+    #     best_outlier_points = outlier_points
+    #     best_abrupt = abrupt_drift_point
+    #     best_incre = incremental_begin_points
+    #     best_incre_end = incremental_end_points
+
+    return F1_Score, results, drift_points, outlier_points, abrupt_drift_point, incremental_begin_points, incremental_end_points, np.mean(
+        res_nonotlier), np.mean(res)
 
 
 class OptimizationWrapper:
@@ -395,7 +557,7 @@ class OptimizationWrapper:
 
     def __call__(self, parameters):
         """使实例可调用，符合SeqUD的要求"""
-        F1_Score, results, drift_points, outlier_points, abrupt_drift_point, incremental_begin_points, incremental_end_points,res_nonotlier,residual = max_metric(
+        F1_Score, results, drift_points, outlier_points, abrupt_drift_point, incremental_begin_points, incremental_end_points, res_nonotlier, residual = max_metric(
             self.name_detector, parameters, self.true_drift_points, self.judge_size,
             self.model, self.name, self.X, self.all_Y, self.window_size, self.eta
         )
@@ -437,8 +599,8 @@ colors = ['#FFB6C1', '#9acd32', '#eee8aa', '#8470ff', '#625b57', '#87cefa', '#f4
 
 for dataset_name in datasets:
     if dataset_name == "pi4":
-        window_size = 50
-        eta = 1 / 8
+        window_size = 150
+        eta = 1 / 20
         judge_size = 30  # 漂移前后30个点为有效范围
         rate = [0]
         n1=50
@@ -473,9 +635,9 @@ for dataset_name in datasets:
         true_abrupt_points = [24, 810, 1597, 1617, 1659]
         true_incre_points = [210, 411, 456, 517, 877, 940, 1130, 1541, 1562]
         outlier_list = [768, 962, 1688]
-    elif dataset_name == "pi5" or "pi2" or "pi3":
-        window_size = 50
-        eta = 1 / 8
+    elif dataset_name == "pi5" or dataset_name == "pi2" or dataset_name == "pi3":
+        window_size = 100
+        eta = 1 / 20
         judge_size = 30  # 漂移前后30个点为有效范围
         rate = [0]
         n1=50
@@ -591,7 +753,7 @@ for dataset_name in datasets:
         true_abrupt_points = []
         true_incre_points = []
         outlier_list = []
-    elif dataset_name == "worker":
+    elif dataset_name == 'worker':
         window_size = 30
         eta = 1 / 8
         judge_size = 20  # 漂移前后30个点为有效范围
@@ -828,7 +990,7 @@ for dataset_name in datasets:
         true_incre_points = [2797, 5004, 7625]
         outlier_list = []
 
-
+    n1 = 30
     # 定义每个检测器的参数网格
     param_grids = {
         "ADWIN": {"delta": {'Type': 'continuous', 'Range': [0, 1], 'Wrapper': lambda x: x},
@@ -859,25 +1021,28 @@ for dataset_name in datasets:
         },
         "DataStream_Adapt": {
             "delta": {'Type': 'continuous', 'Range': [0, 1], 'Wrapper': lambda x: x},
-            "threshold": {'Type': 'continuous', 'Range': [0, 10], 'Wrapper': lambda x: x},
+            "threshold": {'Type': 'continuous', 'Range': [0, 20], 'Wrapper': lambda x: x},
             "burn_in": {'Type': 'integer', 'Mapping': list(range(1, n1))},
             "k": {'Type': 'integer', 'Mapping': list(range(1, n1))}
             # "direction": ["positive"]
         },
         "EWMAD_DT": {
-            "threshold": {'Type': 'continuous', 'Range': [0, 1], 'Wrapper': lambda x: x},
-            "burn_in": {'Type': 'integer', 'Mapping': list(range(1, n2))},
+            "delta": {'Type': 'continuous', 'Range': [0, 0.1], 'Wrapper': lambda x: x},
+            "threshold": {'Type': 'continuous', 'Range': [0, 0.5], 'Wrapper': lambda x: x},
+            "burn_in": {'Type': 'integer', 'Mapping': list(range(1, n1))},
             "alpha": {'Type': 'continuous', 'Range': [0, 0.2], 'Wrapper': lambda x: x},
-            "k": {'Type': 'integer', 'Mapping': list(range(1, n2))}
+            "k": {'Type': 'integer', 'Mapping': list(range(5, 10))},
+            "kk": {'Type': 'integer', 'Mapping': list(range(1, 20))},
         }
     }
 
     detectors = {
-        "EWMAD_DT": EWMAD_DT(threshold=0.8, burn_in=20, alpha=0.1, k=20, direction="positive"),
+        "EWMAD_DT": EWMAD_DT(delta=0.001, threshold=0.8, burn_in=20, alpha=0.1, k=20, kk=20, direction="positive"),
+        "ADWIN": ADWIN(delta=0.002),
         "KSWIN": KSWIN(alpha=0.000001, window_size=100, stat_size=30, data=None),
-        "ADWIN": ADWIN(delta=0.002,mint_min_window_longitude = 10, mdbl_delta = 0.002,mint_clock = 32,mint_min_window_length = 5),
         "PageHinkley": PageHinkley(delta=0.001, threshold=5, burn_in=20, k=10, direction="positive"),
-        "DataStream_Adapt": DataStream_Adapt(delta=0.001, threshold=5, burn_in=20, k=10, direction="positive")
+        "DataStream_Adapt": DataStream_Adapt(delta=0.001, gamma_thres=0.15, threshold=5, burn_in=20, k=10,
+                                             direction="positive")
     }
 
 
@@ -893,7 +1058,9 @@ for dataset_name in datasets:
         "F1_Score_alldrift": 0.0,  # 漂移检测的 F1 分数（浮点数）
         "F1_Score_outlier": 0.0,   # 异常检测的 F1 分数（浮点数）
         "time": 0.0,               # 执行时间（浮点数，单位：秒）
-        "mean_delay": float('inf')  # 平均延迟（浮点数，初始设为无穷大）
+        "mean_delay": float('inf'),  # 平均延迟（浮点数，初始设为无穷大）
+        "mean_delay_abrupt": float('inf'),
+        "mean_delay_incre": float('inf')
     }
 
     for num_r,r in enumerate(rate):
@@ -936,7 +1103,7 @@ for dataset_name in datasets:
                 "ARLF": FastAdaptiveRobustRegressor(input_dim=input_dim, hidden_dim=64, learning_rate=0.005),
                 "$\Theta$-IPOD": IPCD(X=X, Y=all_Y, window_size=window_size, detector=detector, detetor_name=name_detector,eta=eta),
                 "RANSACRegressor":RANSACRegressor(estimator=LinearRegression(), min_samples=2,max_trials=100,stop_probability=0.99,random_state=42),
-                "HuberRegressor":HuberRegressor(epsilon=1.35,alpha=0.0001,max_iter=1000,tol=1e-5),
+                "HuberRegressor":HuberRegressor(epsilon=1.35,alpha=0.0001,max_iter=3000,tol=1e-5),
                 "TheilSenRegressor":TheilSenRegressor(max_subpopulation=1e3, random_state=42)
             }
             # 循环遍历每个模型

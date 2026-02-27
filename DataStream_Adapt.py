@@ -26,7 +26,7 @@ class DataStream_Adapt(StreamingDetector):
 
     input_type = "stream"
 
-    def __init__(self, delta=0.01, threshold=20, burn_in=30, k=10, direction="positive"):
+    def __init__(self, delta=0.01, threshold=20, burn_in=30, k=10, gamma_thres = 1, direction="positive"):
         """
         Args:
             delta (float, optional): Minimum amplitude of change in data needed
@@ -55,6 +55,7 @@ class DataStream_Adapt(StreamingDetector):
         self.threshold = threshold
         self.direction = direction
         self.k = k
+        self.gamma_thres = gamma_thres
         # self.outlier_alarm = "not_outlier"
 
         self._max = 0
@@ -121,12 +122,14 @@ class DataStream_Adapt(StreamingDetector):
         if drift_check and self.samples_since_reset > self.burn_in:
             # print(self.samples_since_reset)
             self.drift_state = "drift"
+            self.drift_state_type = "abrupt"
 
         if len(self._change_scores)>=2*self.k:
             ma_t = np.mean(self._change_scores[(len(self._change_scores) - self.k ):-1])
             ma_t_k = np.mean(self._change_scores[(len(self._change_scores) - 2*self.k ):(len(self._change_scores) - self.k)])
-            if abs(ma_t - ma_t_k) > theta:
-                self.drift_state_type = "incremental_end"
+            if abs(ma_t - ma_t_k) > self.gamma_thres*self._mean:
+                # print(abs(ma_t - ma_t_k))
+                self.drift_state_type = "incremental"
                 self.drift_state = "drift"
         # print(CUSUM, theta / 1000,self.drift_state,self.drift_state_type,self.samples_since_reset)
         # outlier_check =  abs(X_orig-mean) > (3 * std)

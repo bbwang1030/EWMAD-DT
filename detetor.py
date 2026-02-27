@@ -119,18 +119,18 @@ class PageHinkley(StreamingDetector):
         # print(ph_difference,theta)
         drift_check = ph_difference > self.theta
 
-        # if drift_check and self.samples_since_reset > self.burn_in:
-        #     # print(self.samples_since_reset)
-        #     self.drift_state = "drift"
+        if drift_check and self.samples_since_reset > self.burn_in:
+            # print(self.samples_since_reset)
+            self.drift_state = "drift"
 
-        if len(self._thetas) >= self.k+1:
-            diff_theta = self.theta - self._thetas[-self.k]
-            if drift_check and self.samples_since_reset > self.burn_in:
-                self.drift_state = "drift"
-                if diff_theta > 0:
-                    self.drift_state_type = "drift_begin"
-                if diff_theta < 0:
-                    self.drift_state_type = "incremental_end"
+        # if len(self._thetas) >= self.k+1:
+        #     diff_theta = self.theta - self._thetas[-self.k]
+        #     if drift_check and self.samples_since_reset > self.burn_in:
+        #         self.drift_state = "drift"
+        #         if diff_theta > 0:
+        #             self.drift_state_type = "drift_begin"
+        #         if diff_theta < 0:
+        #             self.drift_state_type = "incremental_end"
 
             self._drift_detected.append(drift_check)
         # outlier_check =  abs(X_orig-mean) > (3 * std)
@@ -313,21 +313,21 @@ class DDM():
 
     def __init__(self, min_num_instances=30, warning_level=2.0, out_control_level=3.0):
         # super().__init__()
-        self.samples_since_reset = None
-        self.miss_prob = None
-        self.miss_std = None
-        self.miss_prob_sd_min = None
-        self.miss_prob_min = None
-        self.miss_sd_min = None
+        self.samples_since_reset = 1
+        self.miss_prob = 1
+        self.miss_std = 0
+        self.miss_prob_sd_min = float("inf")
+        self.miss_prob_min = float("inf")
+        self.miss_sd_min = float("inf")
         self.min_instances = min_num_instances
         self.warning_level = warning_level
         self.out_control_level = out_control_level
-        self.drift_state = ""
+        self.drift_state = "111"
         self._mean = 0
         self._thetas = []
         self.drift_state_type = ""
         self._score = []
-        self.reset()
+        # self.reset()
 
     def reset(self):
         """ reset
@@ -366,8 +366,8 @@ class DDM():
         False otherwise.
 
         """
-        # if self.in_concept_change:
-        #     self.reset()
+        if  self.drift_state == "drift":
+            self.reset()
         if len(self._score) >= self.min_instances + 1:
             self.miss_prob = np.mean(self._score[(len(self._score) - self.min_instances ):-1])
             self.miss_std =np.std(self._score[(len(self._score) - self.min_instances ):-1])
@@ -623,7 +623,7 @@ class HDDM_W():
             self.EWMA_estimator = -1.0
             self.independent_bounded_condition_sum = None
 
-    def __init__(self, drift_confidence=0.001, warning_confidence=0.005, lambda_option=0.050, two_side_option=True):
+    def __init__(self, drift_confidence=0.001, lambda_option=0.050, two_side_option=True):
         # super().__init__()
         # super().reset()
         self.total = self.SampleInfo()
@@ -636,7 +636,7 @@ class HDDM_W():
         self.width = 0
         self.delay = 0
         self.drift_confidence = drift_confidence
-        self.warning_confidence = warning_confidence
+        self.warning_confidence = drift_confidence/2
         self.lambda_option = lambda_option
         self.two_side_option = two_side_option
 
@@ -941,7 +941,7 @@ class ADWIN():
     """
     MAX_BUCKETS = 5
 
-    def __init__(self, delta=.002):
+    def __init__(self, delta=.002, mint_min_window_longitude = 10, mdbl_delta = 0.002,mint_clock = 32,mint_min_window_length = 5):
         super().__init__()
         # default values affected by init_bucket()
         self.delta = delta
@@ -955,20 +955,20 @@ class ADWIN():
         self.__init_buckets()
 
         # other default values
-        self.mint_min_window_longitude = 10
+        self.mint_min_window_longitude = mint_min_window_longitude
 
-        self.mdbl_delta = .002
+        self.mdbl_delta = mdbl_delta
         self.mint_time = 0
         self.mdbl_width = 0
 
         self.detect = 0
         self._n_detections = 0
         self.detect_twice = 0
-        self.mint_clock = 32
+        self.mint_clock = mint_clock
 
         self.bln_bucket_deleted = False
         self.bucket_num_max = 0
-        self.mint_min_window_length = 5
+        self.mint_min_window_length = mint_min_window_length
         self.drift_state = ""
         # super().reset()
         self._change_scores=[]
@@ -1347,7 +1347,7 @@ class ADWIN():
 
     def __bln_cut_expression(self, n0, n1, u0, u1, v0, v1, abs_value, delta):
         n = self.width
-        dd = np.log(2 * np.log(n) / delta)
+        dd = np.log(2 * np.log(n) / delta) if delta!=0 else 0
         v = abs(self.variance)
         m = (1. / (n0 - self.mint_min_window_length + 1)) + (1. / (n1 - self.mint_min_window_length + 1))
         epsilon = np.sqrt(2 * m * v * dd) + 1. * 2 / 3 * dd * m
